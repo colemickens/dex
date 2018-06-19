@@ -264,6 +264,7 @@ func newServer(ctx context.Context, c Config, rotationStrategy rotationStrategy)
 	handleWithCORS("/token", s.handleToken)
 	handleWithCORS("/keys", s.handlePublicKeys)
 	handleFunc("/auth", s.handleAuthorization)
+	handleFunc("/device_authorization", s.handleDeviceAuthorization)
 	handleFunc("/auth/{connector}", s.handleConnectorLogin)
 	r.HandleFunc(path.Join(issuerURL.Path, "/callback"), func(w http.ResponseWriter, r *http.Request) {
 		// Strip the X-Remote-* headers to prevent security issues on

@@ -99,6 +99,11 @@ const (
 	errUnsupportedGrantType    = "unsupported_grant_type"
 	errInvalidGrant            = "invalid_grant"
 	errInvalidClient           = "invalid_client"
+
+	// used by oauth-device-flow
+	errAuthorizationPending = "authorization_pending"
+	errSlowDown = "slow_down"
+	errExpiredToken = "expired_token"
 )
 
 const (
@@ -118,6 +123,7 @@ const (
 const (
 	grantTypeAuthorizationCode = "authorization_code"
 	grantTypeRefreshToken      = "refresh_token"
+	grantTypeDeviceCode = "urn:ietf:params:oauth:grant-type:device_code"
 )
 
 const (

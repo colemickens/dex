@@ -20,6 +20,11 @@ import (
 	"github.com/coreos/dex/storage"
 )
 
+const (
+	deviceAuthInterval = 5
+	deviceAuthCodeValidyDuration = 1800
+)
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	start := s.now()
 	err := func() error {
@@ -93,6 +98,7 @@ func (s *Server) handlePublicKeys(w http.ResponseWriter, r *http.Request) {
 type discovery struct {
 	Issuer        string   `json:"issuer"`
 	Auth          string   `json:"authorization_endpoint"`
+	DeviceAuthEndpoint string `json:"device_authorization_endpoint"`
 	Token         string   `json:"token_endpoint"`
 	Keys          string   `json:"jwks_uri"`
 	ResponseTypes []string `json:"response_types_supported"`
@@ -107,6 +113,7 @@ func (s *Server) discoveryHandler() (http.HandlerFunc, error) {
 	d := discovery{
 		Issuer:      s.issuerURL.String(),
 		Auth:        s.absURL("/auth"),
+		DeviceAuthEndpoint: s.absURL("/device_authorization"),
 		Token:       s.absURL("/token"),
 		Keys:        s.absURL("/keys"),
 		Subjects:    []string{"public"},
@@ -134,6 +141,60 @@ func (s *Server) discoveryHandler() (http.HandlerFunc, error) {
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.Write(data)
 	}), nil
+}
+
+type DeviceAuthorizationResponse struct {
+	DeviceCode string `json:"device_code,omitempty"` // required
+	UserCode string `json:"user_code,omitempty"` // required
+	VerificationUri string `json:"verification_uri,omitempty"` // required
+	VerificationUriComplete string `json:"verification_uri_complete,omitempty"` // optional
+	ExpiresIn int `json:"expires_in,omitempty"` // optional
+	Interval int `json:"interval,omitempty"` // optional
+}
+
+const letterBytes = "BCDFGHJKLMNPQRSTVWXZ"
+
+func RandStringBytes(n int) string {
+    b := make([]byte, n)
+    for i := range b {
+        b[i] = letterBytes[rand.Intn(len(letterBytes))]
+    }
+    return string(b)
+}
+
+func (s *Server) handleDeviceAuthorizationRequest(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		// TODO: do we need to parse scope differently (strings.Fields(q.Get("scope")) ?
+		client_id := r.FormValue("client_id") // required
+		scope := r.FormValue("scope") // optional
+
+		// Generate friendly user code per guidance
+		// https://tools.ietf.org/html/draft-ietf-oauth-device-flow-10#section-6.1
+		userCode = fmt.Sprintf("%d-%d", RandStringBytes(4), RandStringBytes(4))
+
+		deviceCode = storage.NewID()
+		deviceAuthRequest := storage.DeviceAuthRequest{
+			ID: deviceCode,
+			ClientID: client.ID,
+			DeviceCode: deviceCode,
+			UserCode: userCode
+			Scopes: scopes,
+		}
+
+		// TODO: store the device auth request
+
+		resp := DeviceAuthorizationResponse{
+			DeviceCode: deviceCode,
+			UserCode: userCode,
+			VerificationUri: s.absURL("/device")
+			VerificationUriComplete: s.absURL("/device?c=" + userCode)
+			ExpiresIn: deviceAuthCodeValidyDuration,
+			Interval: deviceAuthInterval,
+		}
+		w.Write(resp)
+	}
+	// TODO(colemickens): write bad request error
 }
 
 // handleAuthorization handles the OAuth2 auth endpoint.
@@ -182,6 +243,8 @@ func (s *Server) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// TODO: this is where we could use the token hint to select the connector
 
 	connectorInfos := make([]connectorInfo, len(connectors))
 	i := 0
@@ -664,7 +727,8 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	grantType := r.PostFormValue("grant_type")
 	switch grantType {
 	case grantTypeAuthorizationCode:
-		s.handleAuthCode(w, r, client)
+	case grantTypeDeviceCode:
+		s.handleAuthCode(w, r, client, grantType)
 	case grantTypeRefreshToken:
 		s.handleRefreshToken(w, r, client)
 	default:
@@ -673,12 +737,23 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 // handle an access token request https://tools.ietf.org/html/rfc6749#section-4.1.3
+// also: https://tools.ietf.org/html/draft-ietf-oauth-device-flow-10#section-3.4
 func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client storage.Client) {
-	code := r.PostFormValue("code")
-	redirectURI := r.PostFormValue("redirect_uri")
+	var code string
+	if grantType == grantTypeDeviceCode {
+		code = r.PostFormValue("device_code")
+	} else if grantType == grantTypeAuthorizationCode {
+		code := r.PostFormValue("code")
+		redirectURI := r.PostFormValue("redirect_uri")
+
+		if authCode.RedirectURI != redirectURI {
+			s.tokenErrHelper(w, errInvalidRequest, "redirect_uri did not match URI from initial request.", http.StatusBadRequest)
+			return
+		}
+	}
 
 	authCode, err := s.storage.GetAuthCode(code)
-	if err != nil || s.now().After(authCode.Expiry) || authCode.ClientID != client.ID {
+	if err != nil || s.now().After(authCode.Expiry) {
 		if err != storage.ErrNotFound {
 			s.logger.Errorf("failed to get auth code: %v", err)
 			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
@@ -688,9 +763,8 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 		return
 	}
 
-	if authCode.RedirectURI != redirectURI {
-		s.tokenErrHelper(w, errInvalidRequest, "redirect_uri did not match URI from initial request.", http.StatusBadRequest)
-		return
+	if (authCode.ClientID != client.ID) {
+		s.tokenErrHelper(w, errInvalidRequest, "Invalid request (invalid client_id)", http.StatusBadRequest)
 	}
 
 	accessToken := storage.NewID()
